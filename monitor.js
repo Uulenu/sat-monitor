@@ -1,0 +1,8 @@
+{
+  "name": "sat-monitor",
+  "version": "1.0.0",
+  "main": "monitor.js",
+  "scripts": {
+    "start": "node monitor.js"
+  }
+}
