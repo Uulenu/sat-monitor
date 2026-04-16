@@ -3,9 +3,9 @@ const URL =
 
 const ALERT_URL = "https://ntfy.sh/sat-mongolia-alert";
 
-const CHECK_INTERVAL_MS = 30 * 1000;
+const CHECK_INTERVAL_MS = 20 * 1000; 
 const RE_ALERT_AFTER_CHECKS = 4;
-const RE_ALERT_MAX = 10;
+const RE_ALERT_MAX = 4;
 
 let lastState = false;
 let availableSinceChecks = 0;
@@ -17,16 +17,11 @@ let intervalHandle = null;
 function getMongoliaTime() {
   return new Date().toLocaleString("en-GB", {
     timeZone: "Asia/Ulaanbaatar",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
+    hour12: false,
   });
 }
 
-// ---------------- FETCH ----------------
+// ---------------- FETCH (FAST + SAFE) ----------------
 async function fetchWithRetry(url, options = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -35,7 +30,7 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
       return res;
     } catch (err) {
       if (i === retries - 1) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+      await new Promise((r) => setTimeout(r, 1000)); // fast retry
     }
   }
 }
@@ -43,64 +38,53 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
 // ---------------- ALERT ----------------
 async function sendAlert(centers, isReAlert = false) {
   const title = isReAlert
-    ? `[${reAlertCount}/${RE_ALERT_MAX}] SAT STILL OPEN - Mongolia`
-    : `🚨 SAT SEAT OPEN - Mongolia`;
+    ? `[${reAlertCount}/${RE_ALERT_MAX}] STILL OPEN`
+    : `SAT SEAT OPEN`;
 
   const body = centers
-    .map((c) => `• ${c.name || "Unknown"}`)
+    .map((c) => `- ${c.name} (${c.city ?? "??"})`)
     .join("\n");
 
   try {
-    const res = await fetchWithRetry(ALERT_URL, {
+    await fetchWithRetry(ALERT_URL, {
       method: "POST",
       headers: {
         Title: title,
         Priority: "urgent",
-        Tags: "rotating_light,school",
+        Tags: "school",
         "Content-Type": "text/plain",
       },
       body: `${title}\n\n${body}`,
     });
 
-    console.log(`[ALERT SENT] ${res.status}`);
+    console.log(`[ALERT SENT] ${title}`);
   } catch (err) {
     console.error("[ALERT FAILED]", err.message);
   }
 }
 
-// ---------------- CORE LOGIC ----------------
+// ---------------- CORE ----------------
 async function checkSeats() {
   try {
     const res = await fetchWithRetry(URL);
-    const raw = await res.json();
+    const data = await res.json();
 
-    const centers = Array.isArray(raw)
-      ? raw
-      : raw.testCenters || raw.centers || [];
-
-    const availableCenters = centers.filter((c) => {
-      const v = c.seatAvailability;
-      return (
-        v === true ||
-        v === "AVAILABLE" ||
-        v === "OPEN" ||
-        v === "YES" ||
-        v === 1
-      );
-    });
+    //  CONFIRMED correct logic
+    const availableCenters = data.filter(
+      (c) => c.seatAvailability === true
+    );
 
     const isAvailable = availableCenters.length > 0;
 
     console.log(
-      `[CHECK] ${getMongoliaTime()} -> ${
+      `[CHECK] ${getMongoliaTime()} → ${
         isAvailable ? `OPEN (${availableCenters.length})` : "none"
       }`
     );
 
     if (isAvailable) {
-      const firstDetection = !lastState;
-
-      if (firstDetection) {
+      if (!lastState) {
+        // FIRST DETECTION
         reAlertCount = 0;
         availableSinceChecks = 0;
         await sendAlert(availableCenters, false);
@@ -117,7 +101,7 @@ async function checkSeats() {
         }
       }
     } else {
-      if (lastState) console.log("[INFO] Seats closed again.");
+      if (lastState) console.log("[INFO] Seats closed again");
       availableSinceChecks = 0;
       reAlertCount = 0;
     }
@@ -126,15 +110,29 @@ async function checkSeats() {
     consecutiveErrors = 0;
   } catch (err) {
     consecutiveErrors++;
-    console.error(`[ERROR #${consecutiveErrors}]`, err.message);
+
+    const backoff = Math.min(20000 * 2 ** consecutiveErrors, 300000);
+
+    console.error(
+      `[ERROR #${consecutiveErrors}] ${err.message} → backoff ${backoff / 1000}s`
+    );
+
+    restartInterval(backoff);
   }
+}
+
+// ---------------- INTERVAL CONTROL ----------------
+function restartInterval(ms) {
+  if (intervalHandle) clearInterval(intervalHandle);
+  intervalHandle = setInterval(checkSeats, ms);
 }
 
 // ---------------- START ----------------
 function start() {
-  console.log("[START] SAT monitor running");
+  console.log("[START] SAT sniper running");
   console.log(`[INTERVAL] ${CHECK_INTERVAL_MS / 1000}s`);
 
+  // slight jitter to avoid sync with others
   const jitter = Math.random() * 2000;
 
   setTimeout(() => {
@@ -143,10 +141,10 @@ function start() {
   }, jitter);
 }
 
-// ---------------- STOP ----------------
+// ---------------- SAFE EXIT ----------------
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
-    console.log(`\n[${sig}] stopping monitor`);
+    console.log(`\n[${sig}] stopping`);
     if (intervalHandle) clearInterval(intervalHandle);
     process.exit(0);
   });
